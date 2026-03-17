@@ -1,1 +1,814 @@
+import { useState, useEffect, useRef } from "react";
+
+const SUPABASE_URL = "https://gvmzblllsepimhjrrwqf.supabase.co";
+const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imd2bXpibGxsc2VwaW1oanJyd3FmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM0MzA3NzMsImV4cCI6MjA4OTAwNjc3M30.FSK1cPD4VWH3FgGXxOGWFtxITQG1J-hsN1Xdab4_X-g";
+const USER_ID = "dustin-lamphere";
+const USER_NAME = "Dustin";
+
+const POINTS_PER_TASK = 50;
+const BONUS_ALL = 250;
+
+const CAT_COLORS = {
+  "Fitness": "#f97316",
+  "Mindset": "#a78bfa",
+  "Business": "#34d399",
+  "Family": "#f472b6",
+  "Discipline": "#facc15",
+};
+
+const JOURNAL_PROMPTS = [
+  "What's one thing you need to own today that you've been avoiding?",
+  "Where did you fall short yesterday — and what does that cost you?",
+  "What would the best version of you do differently today?",
+  "Who needs you to show up better and how will you do that today?",
+  "What's the ONE thing that if done today, makes everything else easier?",
+  "What fear is disguising itself as a reason not to execute?",
+  "What does winning look like for you today — specifically?",
+];
+
+const TABS = [
+  { id: "power", label: "POWER LIST", icon: "⚡" },
+  { id: "journal", label: "JOURNAL", icon: "📓" },
+  { id: "photos", label: "PHOTOS", icon: "📸" },
+  { id: "challenges", label: "CHALLENGES", icon: "🎯" },
+  { id: "week", label: "WEEKLY", icon: "📊" },
+  { id: "history", label: "HISTORY", icon: "📅" },
+];
+
+const DEFAULT_TASKS = [
+  { id: 1, text: "Complete a 30-min workout", category: "Fitness", completed: false },
+  { id: 2, text: "Work on ELEV8T content for 1 hour", category: "Business", completed: false },
+  { id: 3, text: "Be fully present with family — no phone at dinner", category: "Family", completed: false },
+  { id: 4, text: "10 min visualization or meditation", category: "Mindset", completed: false },
+  { id: 5, text: "Complete your full morning routine", category: "Discipline", completed: false },
+];
+
+function todayKey() { return new Date().toISOString().split("T")[0]; }
+
+const HEADERS = {
+  "apikey": SUPABASE_KEY,
+  "Authorization": `Bearer ${SUPABASE_KEY}`,
+  "Content-Type": "application/json",
+};
+
+async function loadPermanent() {
+  try {
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/elev8t_permanent?user_id=eq.${USER_ID}&limit=1`, { headers: HEADERS });
+    const data = await res.json();
+    return data?.[0] || null;
+  } catch { return null; }
+}
+
+async function savePermanent(payload) {
+  try {
+    const check = await fetch(`${SUPABASE_URL}/rest/v1/elev8t_permanent?user_id=eq.${USER_ID}&limit=1`, { headers: HEADERS });
+    const existing = await check.json();
+    if (existing?.length > 0) {
+      await fetch(`${SUPABASE_URL}/rest/v1/elev8t_permanent?user_id=eq.${USER_ID}`, {
+        method: "PATCH",
+        headers: { ...HEADERS },
+        body: JSON.stringify(payload),
+      });
+    } else {
+      await fetch(`${SUPABASE_URL}/rest/v1/elev8t_permanent`, {
+        method: "POST",
+        headers: { ...HEADERS },
+        body: JSON.stringify({ user_id: USER_ID, ...payload, updated_at: new Date().toISOString() }),
+      });
+    }
+  } catch {}
+}
+
+async function loadDaily(date) {
+  try {
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/elev8t_daily?user_id=eq.${USER_ID}&date=eq.${date}&limit=1`, { headers: HEADERS });
+    const data = await res.json();
+    return data?.[0] || null;
+  } catch { return null; }
+}
+
+async function saveDaily(date, payload) {
+  try {
+    const check = await fetch(`${SUPABASE_URL}/rest/v1/elev8t_daily?user_id=eq.${USER_ID}&date=eq.${date}&limit=1`, { headers: HEADERS });
+    const existing = await check.json();
+    if (existing?.length > 0) {
+      await fetch(`${SUPABASE_URL}/rest/v1/elev8t_daily?user_id=eq.${USER_ID}&date=eq.${date}`, {
+        method: "PATCH",
+        headers: { ...HEADERS },
+        body: JSON.stringify(payload),
+      });
+    } else {
+      await fetch(`${SUPABASE_URL}/rest/v1/elev8t_daily`, {
+        method: "POST",
+        headers: { ...HEADERS },
+        body: JSON.stringify({ user_id: USER_ID, date, ...payload }),
+      });
+    }
+  } catch {}
+}
+
+async function loadAllHistory() {
+  try {
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/elev8t_daily?user_id=eq.${USER_ID}&order=date.desc`, { headers: HEADERS });
+    return await res.json();
+  } catch { return []; }
+}
+
+async function loadWeekDailies(dates) {
+  try {
+    const inClause = dates.map(d => `"${d}"`).join(",");
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/elev8t_daily?user_id=eq.${USER_ID}&date=in.(${inClause})`, { headers: HEADERS });
+    return await res.json();
+  } catch { return []; }
+}
+
+export default function ELEV8TApp() {
+  const [loaded, setLoaded] = useState(false);
+  const [syncMsg, setSyncMsg] = useState("LOADING...");
+  const [tab, setTab] = useState("power");
+  const [tasks, setTasks] = useState(DEFAULT_TASKS);
+  const [journal, setJournal] = useState("");
+  const today = todayKey();
+  const journalPrompt = JOURNAL_PROMPTS[new Date().getDay() % JOURNAL_PROMPTS.length];
+  const [points, setPoints] = useState(0);
+  const [streak, setStreak] = useState(0);
+  const [totalWins, setTotalWins] = useState(0);
+  const [lastWinDate, setLastWinDate] = useState("");
+  const [photos, setPhotos] = useState([]);
+  const [challenges, setChallenges] = useState([]);
+  const [showWin, setShowWin] = useState(false);
+  const [addingTask, setAddingTask] = useState(false);
+  const [newTaskText, setNewTaskText] = useState("");
+  const [newTaskCat, setNewTaskCat] = useState("Fitness");
+  const [editingId, setEditingId] = useState(null);
+  const [editVal, setEditVal] = useState("");
+  const [addingChallenge, setAddingChallenge] = useState(false);
+  const [newChallengeName, setNewChallengeName] = useState("");
+  const [newChallengeDesc, setNewChallengeDesc] = useState("");
+  const [newChallengeDays, setNewChallengeDays] = useState(30);
+  const [weekDailyData, setWeekDailyData] = useState([]);
+  const [historyData, setHistoryData] = useState([]);
+  const [selectedHistoryDay, setSelectedHistoryDay] = useState(null);
+  const fileRef = useRef();
+  const taskSyncTimer = useRef(null);
+  const journalSyncTimer = useRef(null);
+  const permSyncTimer = useRef(null);
+
+  const completedCount = tasks.filter(t => t.completed).length;
+  const allDone = completedCount === tasks.length && tasks.length > 0;
+  const todayXP = completedCount * POINTS_PER_TASK + (allDone ? BONUS_ALL : 0);
+
+  useEffect(() => {
+    async function init() {
+      setSyncMsg("LOADING...");
+      const perm = await loadPermanent();
+      if (perm) {
+        setPoints(perm.points ?? 0);
+        setStreak(perm.streak ?? 0);
+        setTotalWins(perm.total_wins ?? 0);
+        setLastWinDate(perm.last_win_date ?? "");
+        setPhotos(perm.photos ?? []);
+        setChallenges(perm.challenges ?? []);
+      }
+      const daily = await loadDaily(today);
+      if (daily) {
+        if (daily.tasks && daily.tasks.length > 0) setTasks(daily.tasks);
+        if (daily.journal) setJournal(daily.journal);
+      }
+      const weekDates = getWeekDates();
+      const weekData = await loadWeekDailies(weekDates);
+      setWeekDailyData(weekData);
+      setLoaded(true);
+      setSyncMsg("✓ LIVE");
+    }
+    init();
+  }, []);
+
+  useEffect(() => {
+    if (!loaded) return;
+    if (allDone && lastWinDate !== today) {
+      const np = points + todayXP;
+      const ns = streak + 1;
+      const nw = totalWins + 1;
+      setPoints(np);
+      setStreak(ns);
+      setTotalWins(nw);
+      setLastWinDate(today);
+      setShowWin(true);
+      setTimeout(() => setShowWin(false), 3500);
+      debouncedSavePermanent({ points: np, streak: ns, total_wins: nw, last_win_date: today });
+    }
+  }, [allDone, loaded]);
+
+  function debouncedSaveTasks(newTasks) {
+    if (taskSyncTimer.current) clearTimeout(taskSyncTimer.current);
+    setSyncMsg("⟳ SYNCING...");
+    taskSyncTimer.current = setTimeout(async () => {
+      await saveDaily(today, { tasks: newTasks, journal });
+      setSyncMsg("✓ SYNCED");
+    }, 1000);
+  }
+
+  function debouncedSaveJournal(newJournal) {
+    if (journalSyncTimer.current) clearTimeout(journalSyncTimer.current);
+    setSyncMsg("⟳ SYNCING...");
+    journalSyncTimer.current = setTimeout(async () => {
+      await saveDaily(today, { tasks, journal: newJournal });
+      setSyncMsg("✓ SYNCED");
+    }, 1000);
+  }
+
+  function debouncedSavePermanent(overrides = {}) {
+    if (permSyncTimer.current) clearTimeout(permSyncTimer.current);
+    setSyncMsg("⟳ SYNCING...");
+    permSyncTimer.current = setTimeout(async () => {
+      await savePermanent({
+        points, streak, total_wins: totalWins, last_win_date: lastWinDate,
+        photos, challenges,
+        ...overrides
+      });
+      setSyncMsg("✓ SYNCED");
+    }, 1000);
+  }
+
+  function toggleTask(id) {
+    const task = tasks.find(t => t.id === id);
+    if (task?.completed) return;
+    const updated = tasks.map(t => t.id === id ? { ...t, completed: true } : t);
+    setTasks(updated);
+    debouncedSaveTasks(updated);
+  }
+
+  function addTask() {
+    if (!newTaskText.trim()) return;
+    const updated = [...tasks, { id: Date.now(), text: newTaskText.trim(), category: newTaskCat, completed: false }];
+    setTasks(updated);
+    debouncedSaveTasks(updated);
+    setNewTaskText(""); setAddingTask(false);
+  }
+
+  function removeTask(id) {
+    const task = tasks.find(t => t.id === id);
+    if (task?.completed) return;
+    const updated = tasks.filter(t => t.id !== id);
+    setTasks(updated);
+    debouncedSaveTasks(updated);
+  }
+
+  function saveEdit(id) {
+    const updated = tasks.map(t => t.id === id ? { ...t, text: editVal } : t);
+    setTasks(updated);
+    debouncedSaveTasks(updated);
+    setEditingId(null);
+  }
+
+  function handleJournalChange(val) {
+    setJournal(val);
+    debouncedSaveJournal(val);
+  }
+
+  function handlePhotoUpload(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const updated = [{ id: Date.now(), date: today, label: new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }), src: ev.target.result, note: "" }, ...photos];
+      setPhotos(updated);
+      debouncedSavePermanent({ photos: updated });
+    };
+    reader.readAsDataURL(file);
+    e.target.value = "";
+  }
+
+  function updatePhotoNote(id, note) {
+    const updated = photos.map(ph => ph.id === id ? { ...ph, note } : ph);
+    setPhotos(updated);
+    debouncedSavePermanent({ photos: updated });
+  }
+
+  function deletePhoto(id) {
+    const updated = photos.filter(ph => ph.id !== id);
+    setPhotos(updated);
+    debouncedSavePermanent({ photos: updated });
+  }
+
+  function createChallenge() {
+    if (!newChallengeName.trim()) return;
+    const updated = [...challenges, { id: Date.now(), name: newChallengeName.trim(), desc: newChallengeDesc.trim(), duration: parseInt(newChallengeDays) || 30, currentDay: 1, active: true, startDate: today, lastChecked: null }];
+    setChallenges(updated);
+    debouncedSavePermanent({ challenges: updated });
+    setNewChallengeName(""); setNewChallengeDesc(""); setNewChallengeDays(30); setAddingChallenge(false);
+  }
+
+  function markChallengeDay(id) {
+    const updated = challenges.map(c => {
+      if (c.id !== id || c.lastChecked === today) return c;
+      const next = c.currentDay + 1;
+      if (next > c.duration) return { ...c, active: false, completed: true, currentDay: c.duration, lastChecked: today };
+      return { ...c, currentDay: next, lastChecked: today };
+    });
+    setChallenges(updated);
+    debouncedSavePermanent({ challenges: updated });
+  }
+
+  function deleteChallenge(id) {
+    const updated = challenges.filter(c => c.id !== id);
+    setChallenges(updated);
+    debouncedSavePermanent({ challenges: updated });
+  }
+
+  function getWeekDates() {
+    const dates = [], now = new Date(), dayOfWeek = now.getDay();
+    const monday = new Date(now);
+    monday.setDate(now.getDate() - (dayOfWeek === 0 ? 6 : dayOfWeek - 1));
+    for (let i = 0; i < 7; i++) {
+      const d = new Date(monday);
+      d.setDate(monday.getDate() + i);
+      dates.push(d.toISOString().split("T")[0]);
+    }
+    return dates;
+  }
+
+  function getWeekDays() {
+    const now = new Date(), dayOfWeek = now.getDay();
+    const monday = new Date(now);
+    monday.setDate(now.getDate() - (dayOfWeek === 0 ? 6 : dayOfWeek - 1));
+    return Array.from({ length: 7 }, (_, i) => {
+      const d = new Date(monday);
+      d.setDate(monday.getDate() + i);
+      const key = d.toISOString().split("T")[0];
+      const dayData = weekDailyData.find(wd => wd.date === key);
+      const completedTasks = dayData?.tasks?.filter(t => t.completed).length || 0;
+      const totalTasks = dayData?.tasks?.length || 0;
+      const xp = completedTasks * POINTS_PER_TASK + (completedTasks === totalTasks && totalTasks > 0 ? BONUS_ALL : 0);
+      const won = totalTasks > 0 && completedTasks === totalTasks;
+      return {
+        key,
+        label: d.toLocaleDateString("en-US", { weekday: "short" }),
+        date: d.toLocaleDateString("en-US", { month: "numeric", day: "numeric" }),
+        isToday: key === today,
+        isFuture: d > now && key !== today,
+        data: dayData ? { completed: completedTasks, total: totalTasks, xp, won } : null,
+      };
+    });
+  }
+
+  async function handleHistoryTab() {
+    setTab("history");
+    const all = await loadAllHistory();
+    setHistoryData(all.filter(d => d.date !== today));
+    setSelectedHistoryDay(null);
+  }
+
+  const weekDays = getWeekDays();
+  const winsThisWeek = weekDays.filter(d => d.data?.won).length;
+  const xpThisWeek = weekDays.reduce((sum, d) => sum + (d.data?.xp || 0), 0);
+  const s = styles;
+
+  if (!loaded) return (
+    <div style={{ ...s.root, display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column", gap: 16 }}>
+      <div style={{ fontSize: 10, letterSpacing: 5, color: "#f97316" }}>ELEV8T</div>
+      <div style={{ fontSize: 13, letterSpacing: 3, color: "#555" }}>LOADING YOUR DATA...</div>
+    </div>
+  );
+
+  return (
+    <div style={s.root}>
+      <style>{globalCSS}</style>
+      {showWin && (
+        <div style={s.winOverlay}>
+          <div style={{ textAlign: "center" }}>
+            <div style={{ fontSize: 64 }}>🔥</div>
+            <div style={s.winTitle}>DAY WON</div>
+            <div style={s.winSub}>+{todayXP} XP · EXCELLENCE IS DEFIANCE</div>
+          </div>
+        </div>
+      )}
+      <div style={s.container}>
+        <div style={s.header}>
+          <div>
+            <div style={s.headerEyebrow}>ELEV8T · EXCELLENCE IS DEFIANCE</div>
+            <div style={s.headerTitle}>OPERATOR<br />SYSTEM</div>
+          </div>
+          <div style={s.headerRight}>
+            <div style={s.headerDate}>{new Date().toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" })}</div>
+            <div style={s.headerGreeting}>GM, {USER_NAME} 👊</div>
+            <div style={s.syncStatus}>{syncMsg}</div>
+          </div>
+        </div>
+
+        <div style={s.xpStrip}>
+          <div style={s.xpLeft}>
+            <div style={s.xpLabel}>TODAY</div>
+            <div style={s.xpBarWrap}>
+              <div style={{ ...s.xpBarFill, width: `${Math.min(100, (completedCount / Math.max(tasks.length, 1)) * 100)}%`, background: allDone ? "#facc15" : "#f97316" }} />
+            </div>
+            <div style={s.xpCount}>{completedCount}/{tasks.length} tasks · {todayXP} XP</div>
+          </div>
+          <div style={s.xpStats}>
+            {[{ v: streak, l: "STREAK", c: "#f97316" }, { v: totalWins, l: "WINS", c: "#34d399" }, { v: points, l: "TOTAL XP", c: "#facc15" }].map(m => (
+              <div key={m.l} style={s.xpStat}>
+                <div style={{ ...s.xpStatNum, color: m.c }}>{m.v}</div>
+                <div style={s.xpStatLabel}>{m.l}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div style={s.tabBar}>
+          {TABS.map(t => (
+            <button key={t.id} onClick={() => t.id === "history" ? handleHistoryTab() : setTab(t.id)} style={{ ...s.tabBtn, ...(tab === t.id ? s.tabBtnActive : {}) }}>
+              <span style={{ fontSize: 14 }}>{t.icon}</span>
+              <span>{t.label}</span>
+            </button>
+          ))}
+        </div>
+
+        {tab === "power" && (
+          <div style={s.panel}>
+            <div style={s.panelHeader}>
+              <div style={s.panelTitle}>TODAY'S POWER LIST — {today}</div>
+              <button onClick={() => setAddingTask(a => !a)} style={s.btnAccent}>+ ADD</button>
+            </div>
+            {addingTask && (
+              <div style={s.addBox}>
+                <input value={newTaskText} onChange={e => setNewTaskText(e.target.value)} onKeyDown={e => e.key === "Enter" && addTask()} placeholder="What's your task..." style={s.input} autoFocus />
+                <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                  <select value={newTaskCat} onChange={e => setNewTaskCat(e.target.value)} style={s.select}>{Object.keys(CAT_COLORS).map(c => <option key={c}>{c}</option>)}</select>
+                  <button onClick={addTask} style={s.btnAccent}>ADD TASK</button>
+                </div>
+              </div>
+            )}
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {tasks.map(task => (
+                <div key={task.id} style={{ ...s.taskCard, ...(task.completed ? s.taskCardDone : {}), borderLeft: `3px solid ${CAT_COLORS[task.category] || "#f97316"}` }}>
+                  <button onClick={() => toggleTask(task.id)} style={{ ...s.checkBtn, ...(task.completed ? s.checkBtnDone : {}), cursor: task.completed ? "default" : "pointer" }}>
+                    {task.completed && <span style={{ color: "#000", fontSize: 12, fontWeight: 900 }}>✓</span>}
+                  </button>
+                  <div style={{ flex: 1 }}>
+                    {editingId === task.id && !task.completed ? (
+                      <div style={{ display: "flex", gap: 6 }}>
+                        <input value={editVal} onChange={e => setEditVal(e.target.value)} onKeyDown={e => e.key === "Enter" && saveEdit(task.id)} autoFocus style={{ ...s.input, flex: 1, padding: "4px 8px", fontSize: 13 }} />
+                        <button onClick={() => saveEdit(task.id)} style={s.btnAccentSm}>SAVE</button>
+                      </div>
+                    ) : (
+                      <div style={{ ...s.taskText, ...(task.completed ? s.taskTextDone : {}) }}>{task.text}</div>
+                    )}
+                    <div style={s.taskMeta}>
+                      <span style={{ ...s.catBadge, color: CAT_COLORS[task.category] || "#888" }}>{task.category?.toUpperCase()}</span>
+                      <span style={s.xpBadge}>+{POINTS_PER_TASK} XP</span>
+                      {task.completed && <span style={{ fontSize: 9, color: "#34d399", letterSpacing: 1 }}>LOCKED</span>}
+                    </div>
+                  </div>
+                  {!task.completed && (
+                    <div style={{ display: "flex", gap: 4 }}>
+                      <button onClick={() => { setEditingId(task.id); setEditVal(task.text); }} style={s.iconBtn}>✎</button>
+                      <button onClick={() => removeTask(task.id)} style={s.iconBtn}>×</button>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+            {allDone && <div style={s.winBanner}><div style={s.winBannerTitle}>🔥 DAY COMPLETE</div><div style={s.winBannerSub}>KEEP THE STREAK ALIVE · EXCELLENCE IS DEFIANCE</div></div>}
+            <div style={s.scoringNote}>Scoring: {POINTS_PER_TASK} XP per task · +{BONUS_ALL} XP bonus when all complete · Completed tasks are locked</div>
+          </div>
+        )}
+
+        {tab === "journal" && (
+          <div style={s.panel}>
+            <div style={s.panelHeader}>
+              <div style={s.panelTitle}>DAILY JOURNAL — {today}</div>
+              <div style={s.syncStatus}>{syncMsg}</div>
+            </div>
+            <div style={s.promptCard}>
+              <div style={s.promptLabel}>TODAY'S PROMPT</div>
+              <div style={s.promptText}>"{journalPrompt}"</div>
+            </div>
+            <textarea value={journal} onChange={e => handleJournalChange(e.target.value)} placeholder="Write honestly. No one's watching. Own it..." style={s.textarea} />
+            <div style={s.journalMeta}>{journal.length} characters · {journal.split(/\s+/).filter(Boolean).length} words</div>
+          </div>
+        )}
+
+        {tab === "photos" && (
+          <div style={s.panel}>
+            <div style={s.panelHeader}>
+              <div style={s.panelTitle}>PROGRESS PHOTOS</div>
+              <button onClick={() => fileRef.current.click()} style={s.btnAccent}>+ UPLOAD</button>
+            </div>
+            <input ref={fileRef} type="file" accept="image/*" onChange={handlePhotoUpload} style={{ display: "none" }} />
+            {photos.length === 0 ? (
+              <div style={s.emptyState}>
+                <div style={{ fontSize: 48, marginBottom: 12 }}>📸</div>
+                <div style={s.emptyTitle}>NO PHOTOS YET</div>
+                <div style={s.emptyDesc}>Upload your first progress photo to start tracking.</div>
+                <button onClick={() => fileRef.current.click()} style={{ ...s.btnAccent, marginTop: 16 }}>UPLOAD FIRST PHOTO</button>
+              </div>
+            ) : (
+              <div style={s.photoGrid}>
+                {photos.map(photo => (
+                  <div key={photo.id} style={s.photoCard}>
+                    <img src={photo.src} alt={photo.label} style={s.photoImg} />
+                    <div style={s.photoInfo}>
+                      <div style={s.photoDate}>{photo.label}</div>
+                      <input value={photo.note} onChange={e => updatePhotoNote(photo.id, e.target.value)} placeholder="Add note..." style={{ ...s.input, fontSize: 12, padding: "4px 8px", marginTop: 6 }} />
+                      <button onClick={() => deletePhoto(photo.id)} style={{ ...s.btnGhost, marginTop: 6, fontSize: 10, padding: "3px 8px" }}>DELETE</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {tab === "challenges" && (
+          <div style={s.panel}>
+            <div style={s.panelHeader}>
+              <div style={s.panelTitle}>CHALLENGES</div>
+              <button onClick={() => setAddingChallenge(a => !a)} style={s.btnAccent}>+ CREATE</button>
+            </div>
+            {addingChallenge && (
+              <div style={s.addBox}>
+                <input value={newChallengeName} onChange={e => setNewChallengeName(e.target.value)} placeholder="Challenge name..." style={s.input} />
+                <input value={newChallengeDesc} onChange={e => setNewChallengeDesc(e.target.value)} placeholder="What's the commitment? (optional)" style={{ ...s.input, marginTop: 8 }} />
+                <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                  <select value={newChallengeDays} onChange={e => setNewChallengeDays(e.target.value)} style={s.select}>
+                    {[7, 14, 21, 30, 60, 75, 90].map(d => <option key={d} value={d}>{d} Days</option>)}
+                  </select>
+                  <button onClick={createChallenge} style={s.btnAccent}>CREATE</button>
+                </div>
+              </div>
+            )}
+            {challenges.length === 0 && !addingChallenge && (
+              <div style={s.emptyState}>
+                <div style={{ fontSize: 48, marginBottom: 12 }}>🎯</div>
+                <div style={s.emptyTitle}>NO ACTIVE CHALLENGES</div>
+                <div style={s.emptyDesc}>Create your first challenge to start building momentum.</div>
+              </div>
+            )}
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              {challenges.map(c => (
+                <div key={c.id} style={{ ...s.challengeCard, ...(c.completed ? s.challengeCardDone : {}) }}>
+                  <div style={s.challengeTop}>
+                    <div>
+                      <div style={s.challengeName}>{c.name}</div>
+                      {c.desc && <div style={s.challengeDesc}>{c.desc}</div>}
+                    </div>
+                    <div style={s.challengeDayBig}>
+                      {c.completed ? "✓" : c.currentDay}
+                      <div style={s.challengeDayLabel}>{c.completed ? "DONE" : `/ ${c.duration}`}</div>
+                    </div>
+                  </div>
+                  <div style={s.progressWrap}>
+                    <div style={{ ...s.progressFill, width: `${Math.min(100, ((c.currentDay - 1) / c.duration) * 100)}%`, background: c.completed ? "#34d399" : "#f97316" }} />
+                  </div>
+                  <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+                    {c.active && !c.completed && (
+                      <button onClick={() => markChallengeDay(c.id)} disabled={c.lastChecked === today} style={{ ...s.btnAccent, flex: 1, opacity: c.lastChecked === today ? 0.4 : 1 }}>
+                        {c.lastChecked === today ? "✓ DAY LOGGED" : "MARK DAY COMPLETE"}
+                      </button>
+                    )}
+                    {c.completed && <div style={s.completedTag}>CHALLENGE COMPLETE 🏆</div>}
+                    <button onClick={() => deleteChallenge(c.id)} style={s.btnGhost}>REMOVE</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {tab === "week" && (
+          <div style={s.panel}>
+            <div style={s.panelHeader}>
+              <div style={s.panelTitle}>WEEKLY SUMMARY</div>
+              <div style={s.weekBadge}>{winsThisWeek}/7 WINS</div>
+            </div>
+            <div style={s.weekGrid}>
+              {weekDays.map(d => (
+                <div key={d.key} style={{ ...s.weekDay, ...(d.isToday ? s.weekDayToday : {}), ...(d.isFuture ? s.weekDayFuture : {}) }}>
+                  <div style={s.weekDayLabel}>{d.label}</div>
+                  <div style={s.weekDayDate}>{d.date}</div>
+                  {d.data && !d.isFuture ? (
+                    <>
+                      <div style={{ fontSize: 20, margin: "6px 0" }}>{d.data.won ? "🔥" : "○"}</div>
+                      <div style={{ ...s.weekDayXP, color: d.data.won ? "#facc15" : "#555" }}>{d.data.xp} XP</div>
+                      <div style={s.weekDayTasks}>{d.data.completed}/{d.data.total}</div>
+                    </>
+                  ) : (
+                    <div style={{ fontSize: 20, margin: "6px 0", opacity: 0.2 }}>—</div>
+                  )}
+                </div>
+              ))}
+            </div>
+            <div style={s.weekStats}>
+              {[
+                { label: "WINS THIS WEEK", val: `${winsThisWeek}/7`, color: "#f97316" },
+                { label: "XP THIS WEEK", val: xpThisWeek, color: "#facc15" },
+                { label: "CURRENT STREAK", val: `${streak} days`, color: "#34d399" },
+                { label: "TOTAL XP ALL TIME", val: points, color: "#a78bfa" },
+              ].map(st => (
+                <div key={st.label} style={s.weekStatCard}>
+                  <div style={{ ...s.weekStatVal, color: st.color }}>{st.val}</div>
+                  <div style={s.weekStatLabel}>{st.label}</div>
+                </div>
+              ))}
+            </div>
+            <div style={s.weekMotivation}>
+              {winsThisWeek >= 6 ? "🏆 ELITE WEEK — You're operating at the highest level." :
+               winsThisWeek >= 4 ? "🔥 SOLID WEEK — Keep building. Don't let off the gas." :
+               winsThisWeek >= 2 ? "⚡ TRENDING UP — More consistency = more compound results." :
+               "💪 GET BACK UP — One bad week doesn't define you. Execute today."}
+            </div>
+          </div>
+        )}
+
+        {tab === "history" && (
+          <div style={s.panel}>
+            <div style={s.panelHeader}>
+              <div style={s.panelTitle}>HISTORY</div>
+              {selectedHistoryDay && (
+                <button onClick={() => setSelectedHistoryDay(null)} style={s.btnGhost}>← BACK</button>
+              )}
+            </div>
+            {!selectedHistoryDay ? (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {historyData.length === 0 ? (
+                  <div style={s.emptyState}>
+                    <div style={{ fontSize: 48, marginBottom: 12 }}>📅</div>
+                    <div style={s.emptyTitle}>NO HISTORY YET</div>
+                    <div style={s.emptyDesc}>Your past days will appear here as you build your streak.</div>
+                  </div>
+                ) : (
+                  historyData.map(day => {
+                    const completed = day.tasks?.filter(t => t.completed).length || 0;
+                    const total = day.tasks?.length || 0;
+                    const xp = completed * POINTS_PER_TASK + (completed === total && total > 0 ? BONUS_ALL : 0);
+                    const won = total > 0 && completed === total;
+                    return (
+                      <div key={day.date} onClick={() => setSelectedHistoryDay(day)} style={{ ...s.historyCard, cursor: "pointer" }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                          <div>
+                            <div style={s.historyDate}>{new Date(day.date + "T12:00:00").toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric", year: "numeric" })}</div>
+                            <div style={s.historyMeta}>{completed}/{total} tasks · {xp} XP</div>
+                          </div>
+                          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                            <div style={{ fontSize: 24 }}>{won ? "🔥" : "○"}</div>
+                            <div style={{ fontSize: 14, color: "#555" }}>→</div>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+                <div style={s.historyDayHeader}>
+                  {new Date(selectedHistoryDay.date + "T12:00:00").toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric" })}
+                </div>
+                <div>
+                  <div style={s.historySectionTitle}>POWER LIST</div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 8 }}>
+                    {(selectedHistoryDay.tasks || []).map((task, i) => (
+                      <div key={i} style={{ ...s.taskCard, ...(task.completed ? s.taskCardDone : {}), borderLeft: `3px solid ${CAT_COLORS[task.category] || "#f97316"}` }}>
+                        <div style={{ ...s.checkBtn, ...(task.completed ? s.checkBtnDone : {}), cursor: "default" }}>
+                          {task.completed && <span style={{ color: "#000", fontSize: 12, fontWeight: 900 }}>✓</span>}
+                        </div>
+                        <div style={{ flex: 1 }}>
+                          <div style={{ ...s.taskText, ...(task.completed ? s.taskTextDone : {}) }}>{task.text}</div>
+                          <div style={s.taskMeta}>
+                            <span style={{ ...s.catBadge, color: CAT_COLORS[task.category] || "#888" }}>{task.category?.toUpperCase()}</span>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                {selectedHistoryDay.journal ? (
+                  <div>
+                    <div style={s.historySectionTitle}>JOURNAL ENTRY</div>
+                    <div style={s.historyJournal}>{selectedHistoryDay.journal}</div>
+                  </div>
+                ) : (
+                  <div style={{ ...s.emptyState, padding: "20px" }}>
+                    <div style={s.emptyDesc}>No journal entry for this day.</div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+      </div>
+    </div>
+  );
+}
+
+const styles = {
+  root: { minHeight: "100vh", background: "#080808", color: "#e8e0d0", fontFamily: "'Barlow Condensed', 'Oswald', Impact, sans-serif", position: "relative" },
+  container: { maxWidth: 720, margin: "0 auto", padding: "20px 14px 60px" },
+  winOverlay: { position: "fixed", inset: 0, zIndex: 200, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,0.92)" },
+  winTitle: { fontSize: 52, fontWeight: 900, color: "#f97316", letterSpacing: 6, textTransform: "uppercase" },
+  winSub: { fontSize: 18, color: "#facc15", marginTop: 8, letterSpacing: 3 },
+  header: { display: "flex", justifyContent: "space-between", alignItems: "flex-end", marginBottom: 20, borderBottom: "2px solid #f97316", paddingBottom: 16 },
+  headerEyebrow: { fontSize: 10, letterSpacing: 5, color: "#f97316", marginBottom: 4 },
+  headerTitle: { fontSize: 38, fontWeight: 900, letterSpacing: 3, lineHeight: 1.05, textTransform: "uppercase" },
+  headerRight: { textAlign: "right" },
+  headerDate: { fontSize: 12, color: "#555", letterSpacing: 2, marginBottom: 4 },
+  headerGreeting: { fontSize: 15, color: "#e8e0d0", letterSpacing: 1 },
+  syncStatus: { fontSize: 9, letterSpacing: 2, color: "#34d399", marginTop: 4 },
+  xpStrip: { background: "#111", border: "1px solid #1e1e1e", borderRadius: 6, padding: "14px 16px", marginBottom: 16, display: "flex", gap: 20, alignItems: "center" },
+  xpLeft: { flex: 1 },
+  xpLabel: { fontSize: 9, letterSpacing: 4, color: "#555", marginBottom: 6 },
+  xpBarWrap: { background: "#1a1a1a", borderRadius: 2, height: 5, overflow: "hidden", marginBottom: 6 },
+  xpBarFill: { height: "100%", borderRadius: 2, transition: "width .4s ease" },
+  xpCount: { fontSize: 11, color: "#666", letterSpacing: 1 },
+  xpStats: { display: "flex", gap: 18 },
+  xpStat: { textAlign: "center" },
+  xpStatNum: { fontSize: 26, fontWeight: 900, lineHeight: 1 },
+  xpStatLabel: { fontSize: 8, letterSpacing: 2, color: "#555", marginTop: 2 },
+  tabBar: { display: "flex", gap: 2, background: "#111", padding: 3, borderRadius: 6, marginBottom: 16, overflowX: "auto" },
+  tabBtn: { flex: 1, minWidth: 70, padding: "9px 4px", fontSize: 9, letterSpacing: 1.5, fontFamily: "'Barlow Condensed', 'Oswald', Impact, sans-serif", background: "transparent", color: "#555", border: "none", borderRadius: 4, cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", gap: 3, transition: "all .2s", textTransform: "uppercase", whiteSpace: "nowrap" },
+  tabBtnActive: { background: "#f97316", color: "#000", fontWeight: 700 },
+  panel: { display: "flex", flexDirection: "column", gap: 14 },
+  panelHeader: { display: "flex", justifyContent: "space-between", alignItems: "center" },
+  panelTitle: { fontSize: 11, letterSpacing: 4, color: "#888", textTransform: "uppercase" },
+  btnAccent: { background: "#f97316", color: "#000", border: "none", padding: "8px 14px", fontSize: 10, letterSpacing: 2, fontFamily: "'Barlow Condensed', 'Oswald', Impact, sans-serif", cursor: "pointer", borderRadius: 3, fontWeight: 700, textTransform: "uppercase", transition: "opacity .15s" },
+  btnAccentSm: { background: "#f97316", color: "#000", border: "none", padding: "4px 10px", fontSize: 10, letterSpacing: 2, fontFamily: "'Barlow Condensed', 'Oswald', Impact, sans-serif", cursor: "pointer", borderRadius: 3, fontWeight: 700 },
+  btnGhost: { background: "transparent", border: "1px solid #2a2a2a", color: "#666", padding: "7px 12px", fontSize: 10, letterSpacing: 2, fontFamily: "'Barlow Condensed', 'Oswald', Impact, sans-serif", cursor: "pointer", borderRadius: 3, textTransform: "uppercase" },
+  iconBtn: { background: "transparent", border: "1px solid #222", color: "#555", width: 26, height: 26, borderRadius: 3, cursor: "pointer", fontSize: 13, display: "flex", alignItems: "center", justifyContent: "center" },
+  input: { width: "100%", background: "#0d0d0d", border: "1px solid #222", color: "#e8e0d0", padding: "9px 11px", fontSize: 14, borderRadius: 4, fontFamily: "Georgia, serif", outline: "none", boxSizing: "border-box" },
+  select: { background: "#0d0d0d", border: "1px solid #222", color: "#888", padding: "8px 10px", fontSize: 12, borderRadius: 4, cursor: "pointer", fontFamily: "'Barlow Condensed', 'Oswald', Impact, sans-serif" },
+  addBox: { background: "#111", border: "1px solid #1e1e1e", borderRadius: 6, padding: 14 },
+  taskCard: { background: "#111", border: "1px solid #1e1e1e", borderRadius: 4, padding: "13px 14px", display: "flex", alignItems: "flex-start", gap: 12, transition: "all .2s" },
+  taskCardDone: { background: "#0d130d", border: "1px solid #1a2a1a", opacity: 0.75 },
+  checkBtn: { width: 22, height: 22, minWidth: 22, borderRadius: 4, background: "transparent", border: "2px solid #333", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", marginTop: 2 },
+  checkBtnDone: { background: "#f97316", border: "2px solid #f97316" },
+  taskText: { fontSize: 15, fontFamily: "Georgia, serif", lineHeight: 1.4 },
+  taskTextDone: { textDecoration: "line-through", color: "#555" },
+  taskMeta: { display: "flex", gap: 8, marginTop: 5, alignItems: "center" },
+  catBadge: { fontSize: 9, letterSpacing: 2, padding: "2px 6px", background: "rgba(255,255,255,0.04)", borderRadius: 2 },
+  xpBadge: { fontSize: 9, color: "#facc15", letterSpacing: 1 },
+  winBanner: { background: "#0d1a0d", border: "1px solid #34d399", borderRadius: 6, padding: 16, textAlign: "center" },
+  winBannerTitle: { fontSize: 24, fontWeight: 900, color: "#34d399", letterSpacing: 4 },
+  winBannerSub: { fontSize: 10, color: "#888", marginTop: 4, letterSpacing: 2 },
+  scoringNote: { fontSize: 10, color: "#333", letterSpacing: 1, textAlign: "center", marginTop: 4 },
+  promptCard: { background: "#111", border: "1px solid #1e1e1e", borderLeft: "3px solid #a78bfa", borderRadius: 4, padding: 16 },
+  promptLabel: { fontSize: 9, letterSpacing: 3, color: "#a78bfa", marginBottom: 8 },
+  promptText: { fontSize: 16, fontFamily: "Georgia, serif", lineHeight: 1.6, fontStyle: "italic" },
+  textarea: { width: "100%", minHeight: 240, background: "#111", border: "1px solid #1e1e1e", color: "#e8e0d0", padding: 16, fontSize: 15, lineHeight: 1.7, borderRadius: 6, resize: "vertical", fontFamily: "Georgia, serif", outline: "none", boxSizing: "border-box" },
+  journalMeta: { fontSize: 10, color: "#333", letterSpacing: 1, textAlign: "right" },
+  photoGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))", gap: 12 },
+  photoCard: { background: "#111", border: "1px solid #1e1e1e", borderRadius: 6, overflow: "hidden" },
+  photoImg: { width: "100%", aspectRatio: "3/4", objectFit: "cover", display: "block" },
+  photoInfo: { padding: "10px 12px" },
+  photoDate: { fontSize: 11, letterSpacing: 2, color: "#f97316" },
+  emptyState: { textAlign: "center", padding: "40px 20px" },
+  emptyTitle: { fontSize: 14, letterSpacing: 4, color: "#444", marginBottom: 8 },
+  emptyDesc: { fontSize: 13, fontFamily: "Georgia, serif", color: "#333" },
+  challengeCard: { background: "#111", border: "1px solid #1e1e1e", borderRadius: 6, padding: 16 },
+  challengeCardDone: { border: "1px solid #1a3a1a" },
+  challengeTop: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 },
+  challengeName: { fontSize: 18, fontWeight: 700, letterSpacing: 1, marginBottom: 4 },
+  challengeDesc: { fontSize: 13, fontFamily: "Georgia, serif", color: "#666", lineHeight: 1.5 },
+  challengeDayBig: { fontSize: 36, fontWeight: 900, color: "#f97316", textAlign: "center", lineHeight: 1, minWidth: 60 },
+  challengeDayLabel: { fontSize: 9, letterSpacing: 2, color: "#555", textAlign: "center" },
+  progressWrap: { background: "#1a1a1a", borderRadius: 2, height: 5 },
+  progressFill: { height: "100%", borderRadius: 2, transition: "width .4s ease" },
+  completedTag: { flex: 1, textAlign: "center", fontSize: 12, color: "#34d399", letterSpacing: 2, padding: "8px 0" },
+  weekGrid: { display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 6 },
+  weekDay: { background: "#111", border: "1px solid #1e1e1e", borderRadius: 4, padding: "10px 6px", textAlign: "center" },
+  weekDayToday: { border: "1px solid #f97316" },
+  weekDayFuture: { opacity: 0.3 },
+  weekDayLabel: { fontSize: 9, letterSpacing: 2, color: "#888", textTransform: "uppercase" },
+  weekDayDate: { fontSize: 11, color: "#555", marginTop: 2 },
+  weekDayXP: { fontSize: 11, fontWeight: 700, letterSpacing: 1 },
+  weekDayTasks: { fontSize: 9, color: "#444", marginTop: 2 },
+  weekBadge: { fontSize: 11, color: "#f97316", letterSpacing: 3 },
+  weekStats: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 },
+  weekStatCard: { background: "#111", border: "1px solid #1e1e1e", borderRadius: 6, padding: "14px 16px" },
+  weekStatVal: { fontSize: 28, fontWeight: 900, lineHeight: 1 },
+  weekStatLabel: { fontSize: 9, letterSpacing: 2, color: "#555", marginTop: 4 },
+  weekMotivation: { background: "#111", border: "1px solid #1e1e1e", borderLeft: "3px solid #f97316", borderRadius: 4, padding: 16, fontSize: 14, fontFamily: "Georgia, serif", lineHeight: 1.6, color: "#aaa" },
+  historyCard: { background: "#111", border: "1px solid #1e1e1e", borderRadius: 6, padding: "14px 16px" },
+  historyDate: { fontSize: 14, fontWeight: 700, letterSpacing: 1, marginBottom: 4 },
+  historyMeta: { fontSize: 11, color: "#555", letterSpacing: 1 },
+  historyDayHeader: { fontSize: 16, fontWeight: 700, color: "#f97316", letterSpacing: 2, paddingBottom: 12, borderBottom: "1px solid #1e1e1e" },
+  historySectionTitle: { fontSize: 10, letterSpacing: 3, color: "#555", marginBottom: 4 },
+  historyJournal: { background: "#111", border: "1px solid #1e1e1e", borderLeft: "3px solid #a78bfa", borderRadius: 4, padding: 16, fontSize: 14, fontFamily: "Georgia, serif", lineHeight: 1.7, color: "#aaa", whiteSpace: "pre-wrap" },
+};
+
+const globalCSS = `
+  @import url('https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@400;700;900&display=swap');
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #080808; }
+  input:focus, textarea:focus, select:focus { border-color: #f97316 !important; }
+  button:hover:not(:disabled) { opacity: 0.82; }
+  button:disabled { cursor: not-allowed; }
+  @keyframes bounce { 0%,60%,100% { transform: translateY(0) } 30% { transform: translateY(-6px) } }
+  ::-webkit-scrollbar { width: 4px; } ::-webkit-scrollbar-track { background: #111; } ::-webkit-scrollbar-thumb { background: #2a2a2a; }
+`;
+```
+
+Then in Terminal:
+```
 pbpaste > ~/elev8t-app/src/App.jsx && cd ~/elev8t-app && git add . && git commit -m "v5 history lock no coach" && git push
